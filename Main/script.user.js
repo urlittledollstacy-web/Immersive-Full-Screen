@@ -27,6 +27,14 @@
         'overscroll-behavior-x', 'overscroll-behavior-y'
     ];
 
+    // X/Twitter relies on the browser viewport/document scroll contract for its mobile timeline.
+    // Preserve the page's own layout and scrolling model there while still using native fullscreen.
+    const PRESERVE_PAGE_LAYOUT = (() => {
+        const host = location.hostname.toLowerCase();
+        return host === 'x.com' || host.endsWith('.x.com') ||
+               host === 'twitter.com' || host.endsWith('.twitter.com');
+    })();
+
     const IMMERSIVE_STYLES = {
         body: {
             height: '100dvh',
@@ -189,6 +197,10 @@
 
     function applyImmersiveStyles(activeSession) {
         if (!activeSession?.active || session !== activeSession) {
+            return;
+        }
+
+        if (PRESERVE_PAGE_LAYOUT) {
             return;
         }
 
