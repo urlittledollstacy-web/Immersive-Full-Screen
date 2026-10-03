@@ -356,8 +356,22 @@
             }
 
             if (session === pendingSession) {
-                rollbackSession(pendingSession);
+                const failedSession = pendingSession;
+                rollbackSession(failedSession);
                 session = null;
+
+                if (
+                    failedSession.active &&
+                    document.fullscreenElement === failedSession.target
+                ) {
+                    void document.exitFullscreen().catch(exitError => {
+                        console.debug(
+                            '[Immersive Full Screen] Initial fullscreen cleanup failed:',
+                            exitError
+                        );
+                    });
+                }
+
                 reconcileButtonVisibility();
             }
 
