@@ -245,8 +245,7 @@
 
         // Never adopt a page-owned/cloned element based on an ID or data attribute.
         if (!document.body) {
-            button = null;
-            return null;
+            return button;
         }
 
         button = createButton();
@@ -369,7 +368,8 @@
     }
 
     function cancelPendingRequest() {
-        pendingRequest = null;
+        if (!pendingRequest) return;
+        pendingRequest.cancelled = true;
 
         if (session && !session.active) {
             session = null;
@@ -461,13 +461,21 @@
 
     function reconcileButtonInBody() {
         if (!document.body) return;
-        if (!button) {
-            ensureButton();
-            return;
+
+        ensureButton();
+
+        if (button && (!button.isConnected || button.parentNode !== document.body)) {
+            document.body.appendChild(button);
         }
 
-        if (!button.isConnected || button.parentNode !== document.body) {
-            document.body.appendChild(button);
+        if (session?.active && document.fullscreenElement === session.target) {
+            try {
+                applyImmersiveStyles(session);
+            } catch (error) {
+                rollbackSession(session);
+                session = null;
+                console.debug('[Immersive Full Screen] Body reconciliation failed:', error);
+            }
         }
 
         reconcileButtonVisibility();
@@ -476,9 +484,23 @@
     function observeBodyReplacement() {
         if (bodyObserver || !document.documentElement) return;
 
-        bodyObserver = new MutationObserver(() => {
+        bodyObserver = new MutationObserver((records) => {
             if (!document.body) return;
-            reconcileButtonInBody();
+
+            const bodyChanged = records.some(record =>
+                record.type === 'childList' &&
+                Array.from(record.removedNodes).includes(document.body)
+            );
+
+            const buttonMoved = records.some(record =>
+                record.type === 'childList' &&
+                (Array.from(record.removedNodes).includes(button) ||
+                 Array.from(record.addedNodes).includes(button))
+            );
+
+            if (bodyChanged || buttonMoved) {
+                reconcileButtonInBody();
+            }
         });
 
         bodyObserver.observe(document.documentElement, {
