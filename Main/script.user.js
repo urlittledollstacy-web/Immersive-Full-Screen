@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Immersive Full Screen Experience
-// @version      0.5
+// @version      0.6
 // @description  Adds a floating button for immersive full screen without black bars
 // @homepageURL  https://github.com/0xArchit/Immersive-Full-Screen
 // @author       0xArchit
@@ -12,12 +12,19 @@
     'use strict';
 
     const ROOT_STYLE_PROPERTIES = [
-        'height', 'width', 'margin', 'padding', 'overflow',
+        'height', 'width',
+        'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+        'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+        'overflow-x', 'overflow-y',
         'position', 'top', 'left', 'right', 'bottom'
     ];
 
     const BODY_STYLE_PROPERTIES = [
-        'height', 'width', 'margin', 'padding', 'overflow', 'overscroll-behavior'
+        'height', 'width',
+        'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+        'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+        'overflow-x', 'overflow-y',
+        'overscroll-behavior-x', 'overscroll-behavior-y'
     ];
 
     const IMMERSIVE_STYLES = {
@@ -63,8 +70,7 @@
             properties: properties.map(property => ({
                 property,
                 value: element.style.getPropertyValue(property),
-                priority: element.style.getPropertyPriority(property),
-                present: element.style.getPropertyValue(property) !== ''
+                priority: element.style.getPropertyPriority(property)
             }))
         };
     }
@@ -73,29 +79,31 @@
         if (!snapshot?.element) return;
 
         for (const item of snapshot.properties) {
-            if (item.present) {
-                snapshot.element.style.setProperty(
-                    item.property,
-                    item.value,
-                    item.priority
-                );
+            if (item.value !== '') {
+                snapshot.element.style.setProperty(item.property, item.value, item.priority);
             } else {
                 snapshot.element.style.removeProperty(item.property);
             }
         }
     }
 
+    function recordModifiedElement(sessionState, target) {
+        if (!sessionState || !target || sessionState.modifiedElements.includes(target)) {
+            return;
+        }
+
+        const properties = target === document.documentElement
+            ? ROOT_STYLE_PROPERTIES
+            : BODY_STYLE_PROPERTIES;
+
+        sessionState.snapshots.push(snapshotStyles(target, properties));
+        sessionState.modifiedElements.push(target);
+    }
+
     function setOwnedStyles(sessionState, target, styles) {
         if (!sessionState || !target) return;
 
-        if (!sessionState.modifiedElements.includes(target)) {
-            const properties = target === document.documentElement
-                ? ROOT_STYLE_PROPERTIES
-                : BODY_STYLE_PROPERTIES;
-
-            sessionState.snapshots.push(snapshotStyles(target, properties));
-            sessionState.modifiedElements.push(target);
-        }
+        recordModifiedElement(sessionState, target);
 
         for (const [property, value] of Object.entries(styles)) {
             target.style.setProperty(property, value);
@@ -105,125 +113,132 @@
     function captureViewportMeta() {
         const element = document.querySelector('meta[name="viewport"]');
 
-        if (!element) {
-            return {
-                element: null,
-                existed: false,
-                content: null
-            };
-        }
-
         return {
-            element,
-            existed: true,
-            content: element.getAttribute('content')
+            originalElement: element,
+            originalContent: element ? element.getAttribute('content') : null,
+            hadOriginal: Boolean(element),
+            modifiedOriginal: false,
+            createdElements: new Set()
         };
     }
 
-    function ensureViewportMeta(sessionState) {
-        if (!sessionState) return null;
-
-        const current = sessionState.viewportMeta;
-
-        if (current.element?.isConnected) {
-            current.lastOwnedElement = current.element;
-            return current.element;
+    function getOwnedViewportElement(state) {
+        if (state.originalElement?.isConnected) {
+            return state.originalElement;
         }
 
-        // Never adopt a page-replaced node after the original element was lost.
-        if (!current.existed && current.createdElement?.isConnected) {
-            current.lastOwnedElement = current.createdElement;
-            return current.createdElement;
+        for (const element of state.createdElements) {
+            if (element.isConnected) {
+                return element;
+            }
         }
 
-        const existing = document.querySelector('meta[name="viewport"]');
-
-        if (existing) {
-            return null;
-        }
-
-        const created = document.createElement('meta');
-        created.name = 'viewport';
-        created.setAttribute(
-            'content',
-            'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover'
-        );
-        document.head.appendChild(created);
-
-        current.createdElement = created;
-        current.lastOwnedElement = created;
-        return created;
+        return null;
     }
 
-    function applyViewportMeta(sessionState) {
-        const meta = ensureViewportMeta(sessionState);
-        if (!meta) return;
+    function applyViewportMeta(state) {
+        if (!state) return;
+
+        let meta = getOwnedViewportElement(state);
+
+        if (!meta) {
+            // Never adopt an existing page-owned replacement.
+            const existing = document.querySelector('meta[name="viewport"]');
+            if (existing) {
+                return;
+            }
+
+            if (!document.head) {
+                throw new Error('Document head is unavailable.');
+            }
+
+            meta = document.createElement('meta');
+            meta.name = 'viewport';
+            document.head.appendChild(meta);
+            state.createdElements.add(meta);
+        }
 
         meta.setAttribute(
             'content',
             'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover'
         );
+
+        if (meta === state.originalElement) {
+            state.modifiedOriginal = true;
+        }
     }
 
-    function restoreViewportMeta(viewportState) {
-        if (!viewportState) return;
+    function restoreViewportMeta(state) {
+        if (!state) return;
 
-        if (viewportState.existed) {
-            const original = viewportState.element;
-
-            if (original?.isConnected) {
-                if (viewportState.content === null) {
-                    original.removeAttribute('content');
-                } else {
-                    original.setAttribute('content', viewportState.content);
-                }
+        if (state.modifiedOriginal && state.originalElement) {
+            if (state.originalContent === null) {
+                state.originalElement.removeAttribute('content');
+            } else {
+                state.originalElement.setAttribute('content', state.originalContent);
             }
-            return;
         }
 
-        // Remove only the node this script created. Never remove a page-owned replacement.
-        if (viewportState.createdElement?.isConnected) {
-            viewportState.createdElement.remove();
+        for (const element of state.createdElements) {
+            if (element.isConnected) {
+                element.remove();
+            }
         }
     }
 
     function applyImmersiveStyles(activeSession) {
-        if (!activeSession?.active || session !== activeSession) return;
+        if (!activeSession?.active || session !== activeSession) {
+            return;
+        }
 
         const root = document.documentElement;
         const body = document.body;
 
-        if (!root || !body) return;
+        if (!root || !body) {
+            throw new Error('Document root/body is unavailable.');
+        }
 
         setOwnedStyles(activeSession, body, IMMERSIVE_STYLES.body);
         setOwnedStyles(activeSession, root, IMMERSIVE_STYLES.root);
-        applyViewportMeta(activeSession);
+        applyViewportMeta(activeSession.viewportMeta);
     }
 
     function showButton() {
+        ensureButton();
         if (button) button.style.display = 'block';
     }
 
     function hideButton() {
-        if (button) button.style.display = 'none';
+        if (button?.isConnected) {
+            button.style.display = 'none';
+        }
+    }
+
+    function rollbackSession(activeSession) {
+        if (!activeSession) return;
+
+        clearOrientationTimer();
+
+        for (let i = activeSession.snapshots.length - 1; i >= 0; i -= 1) {
+            restoreStyles(activeSession.snapshots[i]);
+        }
+
+        restoreViewportMeta(activeSession.viewportMeta);
+        activeSession.active = false;
+        activeSession.applied = false;
     }
 
     function endSession() {
-        if (!session) return;
+        if (!session) {
+            reconcileButtonVisibility();
+            return;
+        }
 
         const finished = session;
         session = null;
 
-        clearOrientationTimer();
-
-        finished.active = false;
-
-        for (let i = finished.snapshots.length - 1; i >= 0; i -= 1) {
-            restoreStyles(finished.snapshots[i]);
-        }
-
-        restoreViewportMeta(finished.viewportMeta);
-        showButton();
+        rollbackSession(finished);
+        reconcileButtonVisibility();
     }
 
     async function enterFullscreen() {
@@ -232,7 +247,6 @@
         }
 
         const target = document.documentElement;
-
         const pendingSession = {
             id: Symbol('fullscreen-session'),
             target,
@@ -253,7 +267,8 @@
             }
 
             if (document.fullscreenElement !== target) {
-                endSession();
+                session = null;
+                reconcileButtonVisibility();
                 return;
             }
 
@@ -263,37 +278,38 @@
             hideButton();
         } catch (error) {
             if (session === pendingSession) {
-                // Nothing was applied before requestFullscreen resolved.
+                rollbackSession(pendingSession);
                 session = null;
-                clearOrientationTimer();
-                showButton();
+                reconcileButtonVisibility();
             }
 
             console.debug(
-                '[Immersive Full Screen] Fullscreen request failed:',
+                '[Immersive Full Screen] Fullscreen request/application failed:',
                 error
             );
         }
     }
 
     function reconcileButtonVisibility() {
+        ensureButton();
+
+        if (!button) return;
+
         if (document.fullscreenElement) {
-            hideButton();
+            button.style.display = 'none';
         } else {
-            showButton();
+            button.style.display = 'block';
         }
     }
 
     function handleFullscreenChange() {
         if (!session) {
-            // Fullscreen may belong to the page, not this script.
             reconcileButtonVisibility();
             return;
         }
 
         if (document.fullscreenElement !== session.target) {
             endSession();
-            reconcileButtonVisibility();
             return;
         }
 
@@ -301,9 +317,21 @@
             session.active = true;
         }
 
-        applyImmersiveStyles(session);
-        session.applied = true;
-        hideButton();
+        try {
+            applyImmersiveStyles(session);
+            session.applied = true;
+            hideButton();
+        } catch (error) {
+            rollbackSession(session);
+            session = null;
+
+            console.debug(
+                '[Immersive Full Screen] Fullscreen reconciliation failed:',
+                error
+            );
+
+            reconcileButtonVisibility();
+        }
     }
 
     function scheduleOrientationReconcile() {
@@ -326,17 +354,23 @@
                 return;
             }
 
-            applyImmersiveStyles(currentSession);
+            try {
+                applyImmersiveStyles(currentSession);
+            } catch (error) {
+                rollbackSession(currentSession);
+                session = null;
+
+                console.debug(
+                    '[Immersive Full Screen] Orientation reconciliation failed:',
+                    error
+                );
+
+                reconcileButtonVisibility();
+            }
         }, 300);
     }
 
     function createButton() {
-        const existing = document.getElementById('immersive-fullscreen-button');
-
-        if (existing) {
-            return existing;
-        }
-
         const element = document.createElement('button');
         element.id = 'immersive-fullscreen-button';
         element.type = 'button';
@@ -362,8 +396,30 @@
             void enterFullscreen();
         });
 
-        document.body.appendChild(element);
         return element;
+    }
+
+    function ensureButton() {
+        if (button?.isConnected) {
+            return button;
+        }
+
+        const existing = document.getElementById('immersive-fullscreen-button');
+
+        if (existing && existing.dataset.immersiveFullScreenOwned === 'true') {
+            button = existing;
+            return button;
+        }
+
+        if (!document.body) {
+            button = null;
+            return null;
+        }
+
+        button = createButton();
+        button.dataset.immersiveFullScreenOwned = 'true';
+        document.body.appendChild(button);
+        return button;
     }
 
     function initialize() {
@@ -372,7 +428,8 @@
         }
 
         initializationDone = true;
-        button = createButton();
+
+        ensureButton();
 
         document.addEventListener('fullscreenchange', handleFullscreenChange);
         window.addEventListener(
