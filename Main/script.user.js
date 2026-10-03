@@ -357,11 +357,13 @@
 
             if (session === pendingSession) {
                 const failedSession = pendingSession;
+                const wasActive = failedSession.active;
+
                 rollbackSession(failedSession);
                 session = null;
 
                 if (
-                    failedSession.active &&
+                    wasActive &&
                     document.fullscreenElement === failedSession.target
                 ) {
                     void document.exitFullscreen().catch(exitError => {
