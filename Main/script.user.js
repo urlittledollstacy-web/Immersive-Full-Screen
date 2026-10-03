@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Immersive Full Screen Experience
-// @version      0.6
+// @version      0.7
 // @description  Adds a floating button for immersive full screen without black bars
 // @homepageURL  https://github.com/0xArchit/Immersive-Full-Screen
 // @author       0xArchit
@@ -52,8 +52,10 @@
 
     let button = null;
     let session = null;
+    let pendingRequest = null;
     let orientationTimer = 0;
     let initializationDone = false;
+    let bodyObserver = null;
 
     function clearOrientationTimer() {
         if (orientationTimer) {
@@ -116,7 +118,6 @@
         return {
             originalElement: element,
             originalContent: element ? element.getAttribute('content') : null,
-            hadOriginal: Boolean(element),
             modifiedOriginal: false,
             createdElements: new Set()
         };
@@ -128,7 +129,7 @@
         }
 
         for (const element of state.createdElements) {
-            if (element.isConnected) {
+            if (element?.isConnected) {
                 return element;
             }
         }
@@ -143,8 +144,7 @@
 
         if (!meta) {
             // Never adopt an existing page-owned replacement.
-            const existing = document.querySelector('meta[name="viewport"]');
-            if (existing) {
+            if (document.querySelector('meta[name="viewport"]')) {
                 return;
             }
 
@@ -158,14 +158,16 @@
             state.createdElements.add(meta);
         }
 
+        // Capture the value immediately before the first script-owned write.
+        if (meta === state.originalElement && !state.modifiedOriginal) {
+            state.originalContent = meta.getAttribute('content');
+            state.modifiedOriginal = true;
+        }
+
         meta.setAttribute(
             'content',
             'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover'
         );
-
-        if (meta === state.originalElement) {
-            state.modifiedOriginal = true;
-        }
     }
 
     function restoreViewportMeta(state) {
@@ -180,9 +182,7 @@
         }
 
         for (const element of state.createdElements) {
-            if (element.isConnected) {
-                element.remove();
-            }
+            element?.remove();
         }
     }
 
@@ -203,9 +203,62 @@
         applyViewportMeta(activeSession.viewportMeta);
     }
 
+    function createButton() {
+        const element = document.createElement('button');
+        element.id = 'immersive-fullscreen-button';
+        element.type = 'button';
+        element.textContent = '🖥️';
+        element.setAttribute('aria-label', 'Enter immersive full screen');
+        element.setAttribute('title', 'Enter immersive full screen');
+        element.dataset.immersiveFullScreenOwned = 'true';
+
+        Object.assign(element.style, {
+            position: 'fixed',
+            bottom: '20px',
+            right: '20px',
+            zIndex: '2147483647',
+            padding: '10px 20px',
+            backgroundColor: 'rgba(0, 0, 0, 0.7)',
+            color: 'white',
+            border: 'none',
+            borderRadius: '5px',
+            cursor: 'pointer',
+            fontSize: '16px'
+        });
+
+        element.addEventListener('click', () => {
+            void enterFullscreen();
+        });
+
+        return element;
+    }
+
+    function ensureButton() {
+        if (button && button.isConnected) {
+            return button;
+        }
+
+        if (button && !button.isConnected && document.body) {
+            document.body.appendChild(button);
+            return button;
+        }
+
+        // Never adopt a page-owned/cloned element based on an ID or data attribute.
+        if (!document.body) {
+            button = null;
+            return null;
+        }
+
+        button = createButton();
+        document.body.appendChild(button);
+        return button;
+    }
+
     function showButton() {
         ensureButton();
-        if (button) button.style.display = 'block';
+        if (button) {
+            button.style.display = 'block';
+        }
     }
 
     function hideButton() {
@@ -242,11 +295,17 @@
     }
 
     async function enterFullscreen() {
-        if (session || !document.documentElement?.requestFullscreen) {
+        if (session || pendingRequest || !document.documentElement?.requestFullscreen) {
             return;
         }
 
         const target = document.documentElement;
+        const requestToken = Symbol('fullscreen-request');
+        pendingRequest = {
+            token: requestToken,
+            target
+        };
+
         const pendingSession = {
             id: Symbol('fullscreen-session'),
             target,
@@ -262,7 +321,22 @@
         try {
             await target.requestFullscreen({navigationUI: 'hide'});
 
+            if (!pendingRequest || pendingRequest.token !== requestToken) {
+                // The request was cancelled or superseded.
+                return;
+            }
+
+            pendingRequest = null;
+
             if (session !== pendingSession) {
+                // A late successful request must not resurrect stale state.
+                if (document.fullscreenElement === target) {
+                    try {
+                        await document.exitFullscreen();
+                    } catch (error) {
+                        console.debug('[Immersive Full Screen] Late fullscreen cleanup failed:', error);
+                    }
+                }
                 return;
             }
 
@@ -277,6 +351,10 @@
             pendingSession.applied = true;
             hideButton();
         } catch (error) {
+            if (pendingRequest?.token === requestToken) {
+                pendingRequest = null;
+            }
+
             if (session === pendingSession) {
                 rollbackSession(pendingSession);
                 session = null;
@@ -290,15 +368,19 @@
         }
     }
 
-    function reconcileButtonVisibility() {
-        ensureButton();
+    function cancelPendingRequest() {
+        pendingRequest = null;
 
-        if (!button) return;
+        if (session && !session.active) {
+            session = null;
+        }
+    }
+
+    function reconcileButtonVisibility() {
+        showButton();
 
         if (document.fullscreenElement) {
-            button.style.display = 'none';
-        } else {
-            button.style.display = 'block';
+            hideButton();
         }
     }
 
@@ -309,6 +391,12 @@
         }
 
         if (document.fullscreenElement !== session.target) {
+            if (!session.active) {
+                cancelPendingRequest();
+                reconcileButtonVisibility();
+                return;
+            }
+
             endSession();
             return;
         }
@@ -338,6 +426,7 @@
         clearOrientationTimer();
 
         if (!session?.active || document.fullscreenElement !== session.target) {
+            ensureButton();
             return;
         }
 
@@ -370,56 +459,32 @@
         }, 300);
     }
 
-    function createButton() {
-        const element = document.createElement('button');
-        element.id = 'immersive-fullscreen-button';
-        element.type = 'button';
-        element.textContent = '🖥️';
-        element.setAttribute('aria-label', 'Enter immersive full screen');
-        element.setAttribute('title', 'Enter immersive full screen');
+    function reconcileButtonInBody() {
+        if (!document.body) return;
+        if (!button) {
+            ensureButton();
+            return;
+        }
 
-        Object.assign(element.style, {
-            position: 'fixed',
-            bottom: '20px',
-            right: '20px',
-            zIndex: '2147483647',
-            padding: '10px 20px',
-            backgroundColor: 'rgba(0, 0, 0, 0.7)',
-            color: 'white',
-            border: 'none',
-            borderRadius: '5px',
-            cursor: 'pointer',
-            fontSize: '16px'
-        });
+        if (!button.isConnected || button.parentNode !== document.body) {
+            document.body.appendChild(button);
+        }
 
-        element.addEventListener('click', () => {
-            void enterFullscreen();
-        });
-
-        return element;
+        reconcileButtonVisibility();
     }
 
-    function ensureButton() {
-        if (button?.isConnected) {
-            return button;
-        }
+    function observeBodyReplacement() {
+        if (bodyObserver || !document.documentElement) return;
 
-        const existing = document.getElementById('immersive-fullscreen-button');
+        bodyObserver = new MutationObserver(() => {
+            if (!document.body) return;
+            reconcileButtonInBody();
+        });
 
-        if (existing && existing.dataset.immersiveFullScreenOwned === 'true') {
-            button = existing;
-            return button;
-        }
-
-        if (!document.body) {
-            button = null;
-            return null;
-        }
-
-        button = createButton();
-        button.dataset.immersiveFullScreenOwned = 'true';
-        document.body.appendChild(button);
-        return button;
+        bodyObserver.observe(document.documentElement, {
+            childList: true,
+            subtree: true
+        });
     }
 
     function initialize() {
@@ -428,8 +493,8 @@
         }
 
         initializationDone = true;
-
         ensureButton();
+        observeBodyReplacement();
 
         document.addEventListener('fullscreenchange', handleFullscreenChange);
         window.addEventListener(
