@@ -56,6 +56,7 @@
     let orientationTimer = 0;
     let initializationDone = false;
     let bodyObserver = null;
+    let lastObservedBody = null;
 
     function clearOrientationTimer() {
         if (orientationTimer) {
@@ -410,8 +411,18 @@
             session.applied = true;
             hideButton();
         } catch (error) {
-            rollbackSession(session);
+            const failedSession = session;
+            rollbackSession(failedSession);
             session = null;
+
+            if (document.fullscreenElement === failedSession.target) {
+                void document.exitFullscreen().catch(exitError => {
+                    console.debug(
+                        '[Immersive Full Screen] Fullscreen cleanup failed:',
+                        exitError
+                    );
+                });
+            }
 
             console.debug(
                 '[Immersive Full Screen] Fullscreen reconciliation failed:',
@@ -446,8 +457,18 @@
             try {
                 applyImmersiveStyles(currentSession);
             } catch (error) {
-                rollbackSession(currentSession);
+                const failedSession = currentSession;
+                rollbackSession(failedSession);
                 session = null;
+
+                if (document.fullscreenElement === failedSession.target) {
+                    void document.exitFullscreen().catch(exitError => {
+                        console.debug(
+                            '[Immersive Full Screen] Orientation fullscreen cleanup failed:',
+                            exitError
+                        );
+                    });
+                }
 
                 console.debug(
                     '[Immersive Full Screen] Orientation reconciliation failed:',
@@ -472,8 +493,19 @@
             try {
                 applyImmersiveStyles(session);
             } catch (error) {
-                rollbackSession(session);
+                const failedSession = session;
+                rollbackSession(failedSession);
                 session = null;
+
+                if (document.fullscreenElement === failedSession.target) {
+                    void document.exitFullscreen().catch(exitError => {
+                        console.debug(
+                            '[Immersive Full Screen] Body fullscreen cleanup failed:',
+                            exitError
+                        );
+                    });
+                }
+
                 console.debug('[Immersive Full Screen] Body reconciliation failed:', error);
             }
         }
@@ -484,13 +516,13 @@
     function observeBodyReplacement() {
         if (bodyObserver || !document.documentElement) return;
 
-        bodyObserver = new MutationObserver((records) => {
-            if (!document.body) return;
+        lastObservedBody = document.body;
 
-            const bodyChanged = records.some(record =>
-                record.type === 'childList' &&
-                Array.from(record.removedNodes).includes(document.body)
-            );
+        bodyObserver = new MutationObserver((records) => {
+            const currentBody = document.body;
+            if (!currentBody) return;
+
+            const bodyChanged = currentBody !== lastObservedBody;
 
             const buttonMoved = records.some(record =>
                 record.type === 'childList' &&
@@ -498,7 +530,17 @@
                  Array.from(record.addedNodes).includes(button))
             );
 
-            if (bodyChanged || buttonMoved) {
+            const buttonAncestorRemoved = button && records.some(record =>
+                record.type === 'childList' &&
+                Array.from(record.removedNodes).some(node =>
+                    node === button ||
+                    (node.nodeType === Node.ELEMENT_NODE && node.contains(button))
+                )
+            );
+
+            lastObservedBody = currentBody;
+
+            if (bodyChanged || buttonMoved || buttonAncestorRemoved) {
                 reconcileButtonInBody();
             }
         });
